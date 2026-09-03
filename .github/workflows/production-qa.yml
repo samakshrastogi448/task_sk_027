@@ -1,0 +1,45 @@
+name: Production QA
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  production-qa:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      statuses: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Source build / pre-deploy gate
+        run: npm install && npm run build
+      - name: Probe canonical production URL
+        id: probe
+        shell: bash
+        run: |
+          code=$(curl -L -s -o /dev/null -w '%{http_code}' --max-time 20 https://tasksk027.vercel.app || true)
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "Canonical probe HTTP $code"
+      - name: Waiting for Vercel Git integration
+        if: steps.probe.outputs.code != '200'
+        run: echo 'Canonical production is not healthy yet; this run is non-approving.'
+      - name: Verify exact-commit Vercel SUCCESS
+        if: steps.probe.outputs.code == '200'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          json=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/status")
+          echo "$json"
+          echo "$json" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const j=JSON.parse(s);const ok=(j.statuses||[]).some(x=>/vercel/i.test(x.context||'')&&x.state==='success');if(!ok){console.error('Exact-commit Vercel SUCCESS missing');process.exit(1)}})"
+      - name: Install Playwright Chromium
+        if: steps.probe.outputs.code == '200'
+        run: npx -y playwright@latest install --with-deps chromium
+      - name: Real four-viewport Production QA
+        if: steps.probe.outputs.code == '200'
+        env:
+          PRODUCTION_URL: https://tasksk027.vercel.app
+        run: npx -y -p playwright@latest node qa.mjs
